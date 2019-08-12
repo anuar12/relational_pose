@@ -13,6 +13,9 @@ import logging
 
 import torch
 import torch.nn as nn
+from torch.autograd import Variable
+import torch.nn.functional as F
+import numpy as np
 
 
 BN_MOMENTUM = 0.1
@@ -100,6 +103,113 @@ class Bottleneck(nn.Module):
         return out
 
 
+class RNOutputModel(nn.Module):
+    def __init__(self, f_hid, size_out):
+        super(RNOutputModel, self).__init__()
+        self.size_out = size_out
+
+        self.fc2 = nn.Linear(f_hid, f_hid)
+        self.fc3 = nn.Linear(f_hid, size_out)
+
+    def forward(self, x):
+        x = self.fc2(x)
+        x = F.relu(x)
+        x = F.dropout(x)
+        x = self.fc3(x)
+        #x = x.view(1, (self.inp_dim_size**2)*self.size_out)
+        return x
+
+
+class RelationalNetwork(nn.Module):
+    def __init__(self, b, d, f, f_hid, is_cuda=True):
+        """
+        b - batch size
+        d - dimension of the image (assuming it's square)
+        f - number of features (corresponds to number of joints)
+        """
+        super(RelationalNetwork, self).__init__()
+        self.f_hid = f_hid
+
+        self.g_fc1 = nn.Linear(2*(f+2), f_hid)
+        self.g_fc2 = nn.Linear(f_hid, f_hid)
+        #self.g_fc3 = nn.Linear(f_hid, f_hid)
+        #self.g_fc4 = nn.Linear(f_hid, f_hid)
+
+        self.f_fc1 = nn.Linear(f_hid, f_hid)
+
+        self.coord_oi = torch.FloatTensor(b, 2)
+        self.coord_oj = torch.FloatTensor(b, 2)
+        cuda1 = torch.device('cuda:1')
+        if is_cuda:
+            self.coord_oi = self.coord_oi.cuda(cuda1)
+            self.coord_oj = self.coord_oj.cuda(cuda1)
+        self.coord_oi = Variable(self.coord_oi)
+        self.coord_oj = Variable(self.coord_oj)
+
+        # prepare coord tensor
+        def cvt_coord(i, d):
+            # TODO: this is not exact
+            # [((i+1)/n - n/2) / (n/2), ...]
+            #return [(i / 5 - 2) / 2., (i % 5 - 2) / 2.]
+            return [( (i+1) / d - d/2) / (d/2), ( (i+1) % d - d/2) / (d/2)]
+
+        self.coord_tensor = torch.FloatTensor(b, d**2, 2)
+        if is_cuda:
+            self.coord_tensor = self.coord_tensor.cuda(cuda1)
+        self.coord_tensor = Variable(self.coord_tensor)
+        np_coord_tensor = np.zeros((b, d**2, 2))
+        for i in range(d**2):
+            np_coord_tensor[:, i, :] = np.array(cvt_coord(i, d))
+        self.coord_tensor.data.copy_(torch.from_numpy(np_coord_tensor))
+
+        self.fcout = RNOutputModel(f_hid, f)  # TODO: argument is number of joints
+
+    def forward(self, x):
+        # x.shape = (b x n_channels x d x d)
+        b = x.size()[0]
+        n_channels = x.size()[1]
+        d = x.size()[2]
+        # x_flat = (64 x 25 x 24)
+        x_flat = x.view(b, n_channels, d * d).permute(0, 2, 1)
+
+        # add coordinates
+        x_flat = torch.cat([x_flat, self.coord_tensor], 2)
+
+        # cast all pairs against each other
+        x_i = torch.unsqueeze(x_flat, 1)  # (b x 1 x d^2 x f+2)
+        x_i = x_i.repeat(1, d**2, 1, 1)  # (b x d^2 x d^2 x f+2)
+        x_j = torch.unsqueeze(x_flat, 2)  # (64 x d^2 x 1 x f+2)
+        x_j = x_j.repeat(1, 1, d**2, 1)  # (64 x d^2 x d^2 x f+2)
+
+        # concatenate all together
+        x_full = torch.cat([x_i, x_j], 3)  # (b x d^2 x d^2 x 2*(f+2))
+
+        # reshape for passing through network
+        x_ = x_full.view(b, d * d * d * d, 2*(n_channels+2))
+        x_ = self.g_fc1(x_)
+        x_ = F.relu(x_)
+        x_ = self.g_fc2(x_)
+        x_ = F.relu(x_)
+        #x_ = self.g_fc3(x_)
+        #x_ = F.relu(x_)
+        #x_ = self.g_fc4(x_)
+        #x_ = F.relu(x_)
+
+        # reshape again and sum
+        x_g = x_.view(b, d * d, d * d, self.f_hid)
+        x_g = x_g.sum(2).squeeze()
+        x_g = x_g.view(b * d * d, self.f_hid)
+
+        """f"""
+        #x_f = self.f_fc1(x_g)
+        #x_f = F.relu(x_f)
+        x_f = x_g
+        out = self.fcout(x_f)
+        out = out.view(b, d, d, n_channels).permute(0, 3, 1, 2)
+
+        return out
+
+
 class PoseResNet(nn.Module):
 
     def __init__(self, block, layers, cfg, **kwargs):
@@ -132,6 +242,13 @@ class PoseResNet(nn.Module):
             stride=1,
             padding=1 if extra.FINAL_CONV_KERNEL == 3 else 0
         )
+
+        self.rn = RelationalNetwork(int(cfg.TRAIN.BATCH_SIZE_PER_GPU / len(cfg.GPUS)),
+                                    cfg.MODEL.HEATMAP_SIZE[0],
+                                    cfg.MODEL.NUM_JOINTS,
+                                    256,
+                                    is_cuda=True)
+
 
     def _make_layer(self, block, planes, blocks, stride=1):
         downsample = None
@@ -204,6 +321,8 @@ class PoseResNet(nn.Module):
         x = self.deconv_layers(x)
         x = self.final_layer(x)
 
+        x = self.rn(x)
+
         return x
 
     def init_weights(self, pretrained=''):
@@ -247,6 +366,9 @@ class PoseResNet(nn.Module):
                     nn.init.normal_(m.weight, std=0.001)
                     if self.deconv_with_bias:
                         nn.init.constant_(m.bias, 0)
+                #elif isinstance(m, nn.Linear):
+                #    nn.init.normal_(m.weight, std=0.001)
+                #    nn.init.constant_(m.bias, 0)
 
 
 resnet_spec = {
