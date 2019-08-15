@@ -112,6 +112,12 @@ def main():
 
     logger.info(get_model_summary(model, dump_input))
 
+    # for name, m in model.named_modules():
+    #     if name.startswith('conv') or name.startswith("layer") or \
+    #         name.startswith('deconv') or name.startswith('bn') or name.startswith('final'):
+    #         for p in m.parameters():
+    #             p.requires_grad = False
+
     model = torch.nn.DataParallel(model, device_ids=cfg.GPUS).cuda()
 
     # define loss function (criterion) and optimizer
@@ -199,15 +205,15 @@ def main():
         else:
             best_model = False
 
-        logger.info('=> saving checkpoint to {}'.format(final_output_dir))
-        save_checkpoint({
-            'epoch': epoch + 1,
-            'model': cfg.MODEL.NAME,
-            'state_dict': model.state_dict(),
-            'best_state_dict': model.module.state_dict(),
-            'perf': perf_indicator,
-            'optimizer': optimizer.state_dict(),
-        }, best_model, final_output_dir)
+        # logger.info('=> saving checkpoint to {}'.format(final_output_dir))
+        # save_checkpoint({
+        #     'epoch': epoch + 1,
+        #     'model': cfg.MODEL.NAME,
+        #     'state_dict': model.state_dict(),
+        #     'best_state_dict': model.module.state_dict(),
+        #     'perf': perf_indicator,
+        #     'optimizer': optimizer.state_dict(),
+        # }, best_model, final_output_dir)
 
     final_model_state_file = os.path.join(
         final_output_dir, 'final_state.pth'

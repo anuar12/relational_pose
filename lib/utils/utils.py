@@ -72,6 +72,9 @@ def get_optimizer(cfg, model):
             model.parameters(),
             lr=cfg.TRAIN.LR
         )
+    elif cfg.TRAIN.OPTIMIZER == "custom":
+        optimizer = optim.Adam([{'params': model.rn.parameters(),
+                                 'lr': cfg.TRAIN.LR}], lr=0.)
 
     return optimizer
 

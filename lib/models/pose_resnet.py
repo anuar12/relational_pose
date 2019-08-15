@@ -16,6 +16,7 @@ import torch.nn as nn
 from torch.autograd import Variable
 import torch.nn.functional as F
 import numpy as np
+import matplotlib.pyplot as plt
 
 
 BN_MOMENTUM = 0.1
@@ -114,7 +115,6 @@ class RNOutputModel(nn.Module):
     def forward(self, x):
         x = self.fc2(x)
         x = F.relu(x)
-        x = F.dropout(x)
         x = self.fc3(x)
         #x = x.view(1, (self.inp_dim_size**2)*self.size_out)
         return x
@@ -125,6 +125,8 @@ class RelationalNetwork(nn.Module):
         """
         b - batch size
         d - dimension of the image (assuming it's square)
+        h - height of the feature map
+        w - width of the feature map
         f - number of features (corresponds to number of joints)
         """
         super(RelationalNetwork, self).__init__()
@@ -132,10 +134,15 @@ class RelationalNetwork(nn.Module):
 
         self.g_fc1 = nn.Linear(2*(f+2), f_hid)
         self.g_fc2 = nn.Linear(f_hid, f_hid)
-        #self.g_fc3 = nn.Linear(f_hid, f_hid)
+        self.g_fc3 = nn.Linear(f_hid, f_hid)
         #self.g_fc4 = nn.Linear(f_hid, f_hid)
+        self.g_fc1_bn = nn.BatchNorm1d(f_hid)
+        self.g_fc2_bn = nn.BatchNorm1d(f_hid)
+        self.g_fc3_bn = nn.BatchNorm1d(f_hid)
+        #self.g_fc4_bn = nn.BatchNorm1d(f_hid)
 
         self.f_fc1 = nn.Linear(f_hid, f_hid)
+        self.f_fc1_bn = nn.BatchNorm1d(f_hid)
 
         self.coord_oi = torch.FloatTensor(b, 2)
         self.coord_oj = torch.FloatTensor(b, 2)
@@ -148,9 +155,6 @@ class RelationalNetwork(nn.Module):
 
         # prepare coord tensor
         def cvt_coord(i, d):
-            # TODO: this is not exact
-            # [((i+1)/n - n/2) / (n/2), ...]
-            #return [(i / 5 - 2) / 2., (i % 5 - 2) / 2.]
             return [( (i+1) / d - d/2) / (d/2), ( (i+1) % d - d/2) / (d/2)]
 
         self.coord_tensor = torch.FloatTensor(b, d**2, 2)
@@ -173,6 +177,7 @@ class RelationalNetwork(nn.Module):
         x_flat = x.view(b, n_channels, d * d).permute(0, 2, 1)
 
         # add coordinates
+        print("HERE: ", x_flat.shape, self.coord_tensor.shape)
         x_flat = torch.cat([x_flat, self.coord_tensor], 2)
 
         # cast all pairs against each other
@@ -186,13 +191,17 @@ class RelationalNetwork(nn.Module):
 
         # reshape for passing through network
         x_ = x_full.view(b, d * d * d * d, 2*(n_channels+2))
-        x_ = self.g_fc1(x_)
+        x_ = self.g_fc1(x_).permute(0, 2, 1)
+        x_ = self.g_fc1_bn(x_).permute(0, 2, 1)
         x_ = F.relu(x_)
-        x_ = self.g_fc2(x_)
+        x_ = self.g_fc2(x_).permute(0, 2, 1)
+        x_ = self.g_fc2_bn(x_).permute(0, 2, 1)
         x_ = F.relu(x_)
-        #x_ = self.g_fc3(x_)
-        #x_ = F.relu(x_)
-        #x_ = self.g_fc4(x_)
+        x_ = self.g_fc3(x_).permute(0, 2, 1)
+        x_ = self.g_fc3_bn(x_).permute(0, 2, 1)
+        x_ = F.relu(x_)
+        #x_ = self.g_fc4(x_).permute(0, 2, 1)
+        #x_ = self.g_fc4_bn(x_).permute(0, 2, 1)
         #x_ = F.relu(x_)
 
         # reshape again and sum
@@ -201,9 +210,9 @@ class RelationalNetwork(nn.Module):
         x_g = x_g.view(b * d * d, self.f_hid)
 
         """f"""
-        #x_f = self.f_fc1(x_g)
-        #x_f = F.relu(x_f)
-        x_f = x_g
+        x_f = self.f_fc1(x_g)
+        x_f = self.f_fc1_bn(x_f)
+        x_f = F.relu(x_f)
         out = self.fcout(x_f)
         out = out.view(b, d, d, n_channels).permute(0, 3, 1, 2)
 
@@ -243,8 +252,9 @@ class PoseResNet(nn.Module):
             padding=1 if extra.FINAL_CONV_KERNEL == 3 else 0
         )
 
+        self.average_pool = nn.AvgPool2d(2, stride=2)
         self.rn = RelationalNetwork(int(cfg.TRAIN.BATCH_SIZE_PER_GPU / len(cfg.GPUS)),
-                                    cfg.MODEL.HEATMAP_SIZE[0],
+                                    int(cfg.MODEL.HEATMAP_SIZE[0] / 2),
                                     cfg.MODEL.NUM_JOINTS,
                                     256,
                                     is_cuda=True)
@@ -321,7 +331,15 @@ class PoseResNet(nn.Module):
         x = self.deconv_layers(x)
         x = self.final_layer(x)
 
+        x = self.average_pool(x)
         x = self.rn(x)
+        x = F.upsample(x, scale_factor=2)
+        #for_vis = x.data.cpu()[0, :3, :, :]
+        #for_vis = np.transpose(for_vis, (1, 2, 0))
+        #print(for_vis.shape)
+        #plt.imshow(for_vis)
+        #plt.show()
+        #plt.close()
 
         return x
 
