@@ -4,16 +4,16 @@ CUDNN:
   DETERMINISTIC: false
   ENABLED: true
 DATA_DIR: ''
-GPUS: (1,)
+GPUS: (0,1)
 OUTPUT_DIR: 'output'
 LOG_DIR: 'log'
 WORKERS: 4
-PRINT_FREQ: 2
+PRINT_FREQ: 500
 
 DATASET:
   COLOR_RGB: false
   DATASET: 'coco'
-  ROOT: '/ssd/coco/'
+  ROOT: '/storage/anuar/coco/'
   TEST_SET: 'val2017'
   TRAIN_SET: 'train2017'
   FLIP: true
@@ -50,20 +50,20 @@ TRAIN:
   BATCH_SIZE_PER_GPU: 2
   SHUFFLE: true
   BEGIN_EPOCH: 0
-  END_EPOCH: 100
+  END_EPOCH: 10
   OPTIMIZER: 'custom'
   LR: 0.001
-  LR_FACTOR: 0.1
+  LR_FACTOR: 0.2
   LR_STEP:
-  - 25
-  - 30
+  - 3
+  - 4
   WD: 0.0001
   GAMMA1: 0.99
   GAMMA2: 0.0
   MOMENTUM: 0.9
   NESTEROV: false
 TEST:
-  BATCH_SIZE_PER_GPU: 1
+  BATCH_SIZE_PER_GPU: 2
   COCO_BBOX_FILE: '/ssd/coco/person_detection_results/COCO_val2017_detections_AP_H_56_person.json'
   BBOX_THRE: 1.0
   IMAGE_THRE: 0.0

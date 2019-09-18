@@ -17,6 +17,7 @@ from torch.autograd import Variable
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
+import torch.utils.checkpoint as checkpoint
 
 
 BN_MOMENTUM = 0.1
@@ -110,14 +111,45 @@ class RNOutputModel(nn.Module):
         self.size_out = size_out
 
         self.fc2 = nn.Linear(f_hid, f_hid)
+        self.fc2_bn = nn.BatchNorm1d(f_hid)
         self.fc3 = nn.Linear(f_hid, size_out)
 
     def forward(self, x):
-        x = self.fc2(x)
+        x = self.fc2(x).permute(0, 2, 1)
+        x = self.fc2_bn(x).permute(0, 2, 1)
         x = F.relu(x)
         x = self.fc3(x)
         #x = x.view(1, (self.inp_dim_size**2)*self.size_out)
         return x
+
+
+class GModule(nn.Module):
+
+    def __init__(self, f, f_hid):
+        super(GModule, self).__init__()
+        self.g_fc1 = nn.Linear(2*(f+2), f_hid)
+        self.g_fc2 = nn.Linear(f_hid, f_hid)
+        self.g_fc3 = nn.Linear(f_hid, f_hid)
+        #self.g_fc4 = nn.Linear(f_hid, f_hid)
+        self.g_fc1_bn = nn.BatchNorm1d(f_hid)
+        self.g_fc2_bn = nn.BatchNorm1d(f_hid)
+        self.g_fc3_bn = nn.BatchNorm1d(f_hid)
+        #self.g_fc4_bn = nn.BatchNorm1d(f_hid)
+
+    def forward(self, x):
+        x_ = self.g_fc1(x).permute(0, 2, 1)
+        x_ = self.g_fc1_bn(x_).permute(0, 2, 1)
+        x_ = F.relu(x_)
+        x_ = self.g_fc2(x_).permute(0, 2, 1)
+        x_ = self.g_fc2_bn(x_).permute(0, 2, 1)
+        x_ = F.relu(x_)
+        x_ = self.g_fc3(x_).permute(0, 2, 1)
+        x_ = self.g_fc3_bn(x_).permute(0, 2, 1)
+        x_ = F.relu(x_)
+        #x_ = self.g_fc4(x_).permute(0, 2, 1)
+        #x_ = self.g_fc4_bn(x_).permute(0, 2, 1)
+        #x_ = F.relu(x_)
+        return x_
 
 
 class RelationalNetwork(nn.Module):
@@ -132,24 +164,18 @@ class RelationalNetwork(nn.Module):
         super(RelationalNetwork, self).__init__()
         self.f_hid = f_hid
 
-        self.g_fc1 = nn.Linear(2*(f+2), f_hid)
-        self.g_fc2 = nn.Linear(f_hid, f_hid)
-        self.g_fc3 = nn.Linear(f_hid, f_hid)
-        #self.g_fc4 = nn.Linear(f_hid, f_hid)
-        self.g_fc1_bn = nn.BatchNorm1d(f_hid)
-        self.g_fc2_bn = nn.BatchNorm1d(f_hid)
-        self.g_fc3_bn = nn.BatchNorm1d(f_hid)
-        #self.g_fc4_bn = nn.BatchNorm1d(f_hid)
+        self.g = GModule(f, f_hid)
 
-        self.f_fc1 = nn.Linear(f_hid, f_hid)
-        self.f_fc1_bn = nn.BatchNorm1d(f_hid)
+        self.affine_aggregate = nn.Linear(d * d, 1)
+
+        #aself.f_fc1 = nn.Linear(f_hid, f_hid)
+        #self.f_fc1_bn = nn.BatchNorm1d(f_hid)
 
         self.coord_oi = torch.FloatTensor(b, 2)
         self.coord_oj = torch.FloatTensor(b, 2)
-        cuda1 = torch.device('cuda:1')
         if is_cuda:
-            self.coord_oi = self.coord_oi.cuda(cuda1)
-            self.coord_oj = self.coord_oj.cuda(cuda1)
+            self.coord_oi = self.coord_oi.cuda()
+            self.coord_oj = self.coord_oj.cuda()
         self.coord_oi = Variable(self.coord_oi)
         self.coord_oj = Variable(self.coord_oj)
 
@@ -159,7 +185,7 @@ class RelationalNetwork(nn.Module):
 
         self.coord_tensor = torch.FloatTensor(b, d**2, 2)
         if is_cuda:
-            self.coord_tensor = self.coord_tensor.cuda(cuda1)
+            self.coord_tensor = self.coord_tensor.cuda()
         self.coord_tensor = Variable(self.coord_tensor)
         np_coord_tensor = np.zeros((b, d**2, 2))
         for i in range(d**2):
@@ -167,6 +193,12 @@ class RelationalNetwork(nn.Module):
         self.coord_tensor.data.copy_(torch.from_numpy(np_coord_tensor))
 
         self.fcout = RNOutputModel(f_hid, f)  # TODO: argument is number of joints
+
+    def custom(self, module):
+        def custom_forward(*inputs):
+            inputs = module(inputs[0])
+            return inputs
+        return custom_forward
 
     def forward(self, x):
         # x.shape = (b x n_channels x d x d)
@@ -177,41 +209,33 @@ class RelationalNetwork(nn.Module):
         x_flat = x.view(b, n_channels, d * d).permute(0, 2, 1)
 
         # add coordinates
-        print("HERE: ", x_flat.shape, self.coord_tensor.shape)
+        if b != self.coord_tensor.shape:  # due to last batch != cfg.BATCH_SIZE
+            self.coord_tensor = self.coord_tensor[:b, ...]
         x_flat = torch.cat([x_flat, self.coord_tensor], 2)
 
         # cast all pairs against each other
         x_i = torch.unsqueeze(x_flat, 1)  # (b x 1 x d^2 x f+2)
         x_i = x_i.repeat(1, d**2, 1, 1)  # (b x d^2 x d^2 x f+2)
-        x_j = torch.unsqueeze(x_flat, 2)  # (64 x d^2 x 1 x f+2)
-        x_j = x_j.repeat(1, 1, d**2, 1)  # (64 x d^2 x d^2 x f+2)
+        x_j = torch.unsqueeze(x_flat, 2)  # (b x d^2 x 1 x f+2)
+        x_j = x_j.repeat(1, 1, d**2, 1)  # (b x d^2 x d^2 x f+2)
 
         # concatenate all together
         x_full = torch.cat([x_i, x_j], 3)  # (b x d^2 x d^2 x 2*(f+2))
 
         # reshape for passing through network
         x_ = x_full.view(b, d * d * d * d, 2*(n_channels+2))
-        x_ = self.g_fc1(x_).permute(0, 2, 1)
-        x_ = self.g_fc1_bn(x_).permute(0, 2, 1)
-        x_ = F.relu(x_)
-        x_ = self.g_fc2(x_).permute(0, 2, 1)
-        x_ = self.g_fc2_bn(x_).permute(0, 2, 1)
-        x_ = F.relu(x_)
-        x_ = self.g_fc3(x_).permute(0, 2, 1)
-        x_ = self.g_fc3_bn(x_).permute(0, 2, 1)
-        x_ = F.relu(x_)
-        #x_ = self.g_fc4(x_).permute(0, 2, 1)
-        #x_ = self.g_fc4_bn(x_).permute(0, 2, 1)
-        #x_ = F.relu(x_)
+        x_ = checkpoint.checkpoint(self.custom(self.g), x_)
 
         # reshape again and sum
         x_g = x_.view(b, d * d, d * d, self.f_hid)
-        x_g = x_g.sum(2).squeeze()
-        x_g = x_g.view(b * d * d, self.f_hid)
+        #x_g = x_g.sum(2).squeeze()
+        x_g = x_g.permute(0, 1, 3, 2)
+        x_g = self.affine_aggregate(x_g).squeeze()
+        x_g = x_g.view(b, d * d, self.f_hid)
 
         """f"""
-        x_f = self.f_fc1(x_g)
-        x_f = self.f_fc1_bn(x_f)
+        x_f = self.f_fc1(x_g).permute(0, 2, 1)
+        x_f = self.f_fc1_bn(x_f).permute(0, 2, 1)
         x_f = F.relu(x_f)
         out = self.fcout(x_f)
         out = out.view(b, d, d, n_channels).permute(0, 3, 1, 2)
@@ -252,11 +276,10 @@ class PoseResNet(nn.Module):
             padding=1 if extra.FINAL_CONV_KERNEL == 3 else 0
         )
 
-        self.average_pool = nn.AvgPool2d(2, stride=2)
-        self.rn = RelationalNetwork(int(cfg.TRAIN.BATCH_SIZE_PER_GPU / len(cfg.GPUS)),
-                                    int(cfg.MODEL.HEATMAP_SIZE[0] / 2),
+        self.rn = RelationalNetwork(cfg.TRAIN.BATCH_SIZE_PER_GPU,
+                                    int(cfg.MODEL.HEATMAP_SIZE[0]), # * 0.875),
                                     cfg.MODEL.NUM_JOINTS,
-                                    256,
+                                    128,
                                     is_cuda=True)
 
 
@@ -331,15 +354,15 @@ class PoseResNet(nn.Module):
         x = self.deconv_layers(x)
         x = self.final_layer(x)
 
-        x = self.average_pool(x)
-        x = self.rn(x)
-        x = F.upsample(x, scale_factor=2)
+        #x = F.interpolate(x, size=(42, 42), mode='bilinear')
         #for_vis = x.data.cpu()[0, :3, :, :]
         #for_vis = np.transpose(for_vis, (1, 2, 0))
         #print(for_vis.shape)
         #plt.imshow(for_vis)
         #plt.show()
         #plt.close()
+        x = self.rn(x)
+        #x = F.interpolate(x, size=(48, 48), mode='bilinear')
 
         return x
 

@@ -14,6 +14,7 @@ import os
 
 import numpy as np
 import torch
+from apex import amp
 
 from core.evaluate import accuracy
 from core.inference import get_final_preds
@@ -57,7 +58,9 @@ def train(config, train_loader, model, criterion, optimizer, epoch,
 
         # compute gradient and do update step
         optimizer.zero_grad()
-        loss.backward()
+        with amp.scale_loss(loss, optimizer) as scaled_loss:
+            scaled_loss.backward()
+        #loss.backward()
         optimizer.step()
 
         # measure accuracy and record loss

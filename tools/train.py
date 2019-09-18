@@ -21,6 +21,8 @@ import torch.utils.data
 import torch.utils.data.distributed
 import torchvision.transforms as transforms
 from tensorboardX import SummaryWriter
+from apex import amp
+from torchsummary import summary
 
 import _init_paths
 from config import cfg
@@ -108,17 +110,24 @@ def main():
     dump_input = torch.rand(
         (1, 3, cfg.MODEL.IMAGE_SIZE[1], cfg.MODEL.IMAGE_SIZE[0])
     )
-    writer_dict['writer'].add_graph(model, (dump_input, ))
+    #writer_dict['writer'].add_graph(model, (dump_input, ))
 
-    logger.info(get_model_summary(model, dump_input))
+    #logger.info(get_model_summary(model, dump_input))
 
-    # for name, m in model.named_modules():
-    #     if name.startswith('conv') or name.startswith("layer") or \
-    #         name.startswith('deconv') or name.startswith('bn') or name.startswith('final'):
-    #         for p in m.parameters():
-    #             p.requires_grad = False
+    for name, m in model.named_modules():
+        if name.startswith('conv') or name.startswith("layer") or \
+            name.startswith('deconv') or name.startswith('bn') or name.startswith('final'):
+            for p in m.parameters():
+                p.requires_grad = False
 
+    optimizer = get_optimizer(cfg, model)
+    model = model.cuda()
+    print(model)
+    model, optimizer = amp.initialize(model, optimizer, opt_level="O1",
+                                      loss_scale="dynamic")
     model = torch.nn.DataParallel(model, device_ids=cfg.GPUS).cuda()
+    print(get_model_summary(model, dump_input))
+    summary(model, input_size=(3, cfg.MODEL.IMAGE_SIZE[1], cfg.MODEL.IMAGE_SIZE[0]))
 
     # define loss function (criterion) and optimizer
     criterion = JointsMSELoss(
@@ -149,7 +158,8 @@ def main():
         batch_size=cfg.TRAIN.BATCH_SIZE_PER_GPU*len(cfg.GPUS),
         shuffle=cfg.TRAIN.SHUFFLE,
         num_workers=cfg.WORKERS,
-        pin_memory=cfg.PIN_MEMORY
+        pin_memory=cfg.PIN_MEMORY,
+        drop_last=True
     )
     valid_loader = torch.utils.data.DataLoader(
         valid_dataset,
@@ -162,7 +172,6 @@ def main():
     best_perf = 0.0
     best_model = False
     last_epoch = -1
-    optimizer = get_optimizer(cfg, model)
     begin_epoch = cfg.TRAIN.BEGIN_EPOCH
     checkpoint_file = os.path.join(
         final_output_dir, 'checkpoint.pth'
@@ -186,11 +195,11 @@ def main():
     )
 
     for epoch in range(begin_epoch, cfg.TRAIN.END_EPOCH):
-        lr_scheduler.step()
 
         # train for one epoch
         train(cfg, train_loader, model, criterion, optimizer, epoch,
               final_output_dir, tb_log_dir, writer_dict)
+        lr_scheduler.step()
 
 
         # evaluate on validation set
@@ -205,15 +214,15 @@ def main():
         else:
             best_model = False
 
-        # logger.info('=> saving checkpoint to {}'.format(final_output_dir))
-        # save_checkpoint({
-        #     'epoch': epoch + 1,
-        #     'model': cfg.MODEL.NAME,
-        #     'state_dict': model.state_dict(),
-        #     'best_state_dict': model.module.state_dict(),
-        #     'perf': perf_indicator,
-        #     'optimizer': optimizer.state_dict(),
-        # }, best_model, final_output_dir)
+        logger.info('=> saving checkpoint to {}'.format(final_output_dir))
+        save_checkpoint({
+            'epoch': epoch + 1,
+            'model': cfg.MODEL.NAME,
+            'state_dict': model.state_dict(),
+            'best_state_dict': model.module.state_dict(),
+            'perf': perf_indicator,
+            'optimizer': optimizer.state_dict(),
+        }, best_model, final_output_dir)
 
     final_model_state_file = os.path.join(
         final_output_dir, 'final_state.pth'
